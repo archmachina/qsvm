@@ -15,6 +15,36 @@ import obslib
 
 logger = logging.getLogger(__name__)
 
+class ConfigTaskExec:
+    def __init__(self, definition, parent):
+        # Extract cmd property
+        self.cmd = obslib.extract_property(definition, "cmd")
+        self.cmd = parent.session.resolve(self.cmd)
+
+        # Make sure there are no unknown values
+        if len(definition.keys()) > 0:
+            raise ValueError(f"Invalid keys on exec definition: {definition.keys()}")
+
+    def run(self):
+        pass
+
+class ConfigTaskContent:
+    def __init__(self, task):
+        # Extract content property
+        self.content = obslib.extract_property(definition, "content")
+        self.content = parent.session.resolve(self.content)
+
+        # Extract path property
+        self.path = obslib.extract_property(definition, "path")
+        self.path = parent.session.resolve(self.path)
+
+        # Make sure there are no unknown values
+        if len(definition.keys()) > 0:
+            raise ValueError(f"Invalid keys on exec definition: {definition.keys()}")
+
+    def run(self):
+        pass
+
 class ConfigTask:
     def __init__(self, task_def, session):
         if not isinstance(task_def, dict):
@@ -27,10 +57,10 @@ class ConfigTask:
         self.session = session
 
         # Extract common properties
-        creates = obslib.extract_property(task_def, "creates", optional=True, default=None)
-        creates = session.resolve(creates, (str, type(None)))
-        if creates == "":
-            creates = None
+        self.creates = obslib.extract_property(task_def, "creates", optional=True, default=None)
+        self.creates = self.session.resolve(self.creates, (str, type(None)))
+        if self.creates = "":
+            self.creates = None
 
         # Make sure there is only a single key defined on the task now
         if len(task_def.keys()) != 1:
@@ -40,34 +70,20 @@ class ConfigTask:
         task_name = list(task_def.keys())[0]
         if task_name == "exec":
             task_value = obslib.extract_property(task_def, "exec")
-            task_value = obslib.resolve(task_value, str)
+            self.impl = ConfigTaskExec(task_value, self)
         elif task_name == "content":
             task_value = obslib.extract_property(task_def, "content")
-            task_value = obslib.resolve(task_value, str)
+            self.impl = ConfigTaskContent(task_value, self)
         else:
             raise ValueError(f"Invalid task name defined on task: {task_name}")
-        
-        self.creates = creates
-        self.task_name = task_name
-        self.task_value = task_value
 
     def run(self):
         # Check if there is a creates clause for this task
         if self.creates is not None:
             if os.path.exists(self.creates):
-                return
+                return 0
 
-        if self.task_name == "exec":
-            # We'll execute the task value and check the return value
-            logger.debug("exec")
-        elif self.task_name == "content":
-            # We'll check the content for the target and update if it is different
-            # than what we want to write to it
-            # The write is conditional so we can preserve the timestamp on the file, which
-            # could be used for something else later
-            logger.debug("content")
-        else:
-            raise ValueError(f"Invalid task name for task: {task_name}")
+        return self.impl.run()
 
 class QSVMSession():
     def __init__(self, path, vmname):
@@ -155,7 +171,7 @@ class QSVMSession():
         exec_cmd = session.resolve(exec_cmd, str)
 
         # Extract prestart command
-        prestart = obslib.extract_property(content, "prestart", optional=True, default=[])
+        prestart = obslib.extract_property(vm_config, "prestart", optional=True, default=[])
         prestart = obslib.coerce_value(prestart, (list, type(None)))
         if prestart is None:
             prestart = []
@@ -163,7 +179,7 @@ class QSVMSession():
         prestart = [ConfigTask(x, session) for x in prestart]
 
         # Extract poststart command
-        poststart = obslib.extract_property(content, "poststart", optional=True, default=[])
+        poststart = obslib.extract_property(vm_config, "poststart", optional=True, default=[])
         poststart = obslib.coerce_value(poststart, (list, type(None)))
         if poststart is None:
             poststart = []
@@ -171,7 +187,7 @@ class QSVMSession():
         poststart = [ConfigTask(x, session) for x in poststart]
 
         # Extract prestop commands
-        prestop = obslib.extract_property(content, "prestop", optional=True, default=[])
+        prestop = obslib.extract_property(vm_config, "prestop", optional=True, default=[])
         prestop = obslib.coerce_value(prestop, (list, type(None)))
         if prestop is None:
             prestop = []
@@ -179,7 +195,7 @@ class QSVMSession():
         prestop = [ConfigTask(x, session) for x in prestop]
 
         # Extract poststop commands
-        poststop = obslib.extract_property(content, "poststop", optional=True, default=[])
+        poststop = obslib.extract_property(vm_config, "poststop", optional=True, default=[])
         poststop = obslib.coerce_value(poststop, (list, type(None)))
         if poststop is None:
             poststop = []
@@ -187,8 +203,11 @@ class QSVMSession():
         poststop = [ConfigTask(x, session) for x in poststop]
 
         # Make sure there are no other keys left
-        if len(content.keys()) > 0:
+        if len(vm_config.keys()) > 0:
             raise ValueError(f"Unknown keys in VM configuration: {content.keys()}")
+
+        if len(qsvm_config.keys()) > 0:
+            raise ValueError(f"Unknown keys in QSVM configuration: {content.keys()}")
 
         # Change to the working directory
         if not os.path.exists(workingdir):
@@ -391,7 +410,8 @@ def process_internal_prestart_vm(args):
 
     # Run the tasks
     for task_def in vm_session.prestart:
-        if task.run(args) != 0:
+        if task_def.run() != 0:
+            logger.error("Task in poststart failed")
             return 1
 
     return 0
@@ -403,7 +423,8 @@ def process_internal_poststart_vm(args):
 
     # Run the tasks
     for task_def in vm_session.poststart:
-        if task.run(args) != 0:
+        if task_def.run() != 0:
+            logger.error("Task in poststart failed")
             return 1
 
     return 0
@@ -415,7 +436,8 @@ def process_internal_prestop_vm(args):
 
     # Run the tasks
     for task_def in vm_session.prestop:
-        if task.run(args) != 0:
+        if task_def.run() != 0:
+            logger.error("Task in prestop failed")
             return 1
 
     return 0
@@ -427,7 +449,8 @@ def process_internal_poststop_vm(args):
 
     # Run the tasks
     for task_def in vm_session.poststop:
-        if task.run(args) != 0:
+        if task_def.run() != 0:
+            logger.error("Task in poststop failed")
             return 1
 
     return 0
@@ -443,7 +466,6 @@ def process_enable(args):
 
 def process_disable(args):
     return run_systemctl(args.user, ["disable", f"{args.svc}@{args.vm}"])
-
 
 def process_args():
     parser = argparse.ArgumentParser(
