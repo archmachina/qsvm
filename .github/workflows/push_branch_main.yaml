@@ -1,0 +1,26 @@
+---
+
+name: push_branch_main
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  push_branch_main:
+    name: "push_branch_main"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: push_branch_main
+        shell: bash
+        run: |
+          ./entrypoint push_branch_main
+        env:
+          SECRET_REGISTRY_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}

@@ -1,0 +1,26 @@
+---
+
+name: linting_main
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  linting_main:
+    name: "linting_main"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: linting_main
+        uses: github/super-linter@v5
+        env:
+          VALIDATE_ALL_CODEBASE: true
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
