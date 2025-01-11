@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 class ConfigTaskExec:
     def __init__(self, definition, parent):
+        definition = obslib.coerce_value(definition, dict)
+
         # Extract cmd property
         self.cmd = obslib.extract_property(definition, "cmd")
         self.cmd = parent.session.resolve(self.cmd)
@@ -26,10 +28,23 @@ class ConfigTaskExec:
             raise ValueError(f"Invalid keys on exec definition: {definition.keys()}")
 
     def run(self):
-        pass
+        logger.debug(f"Exec: running cmd: {self.cmd}")
 
-class ConfigTaskContent:
-    def __init__(self, task):
+        # Run 'cmd' using shell
+        sys.stdout.flush()
+        ret = subprocess.run(self.cmd, shell=True)
+        logger.debug(f"Exec: return code {ret.returncode}")
+
+        if ret.returncode != 0:
+            logger.error(f"Exec command returned non-zero: {ret.returncode}")
+            return 1
+
+        return 0
+
+class ConfigTaskCopy:
+    def __init__(self, definition, parent):
+        definition = obslib.coerce_value(definition, dict)
+
         # Extract content property
         self.content = obslib.extract_property(definition, "content")
         self.content = parent.session.resolve(self.content)
@@ -43,7 +58,33 @@ class ConfigTaskContent:
             raise ValueError(f"Invalid keys on exec definition: {definition.keys()}")
 
     def run(self):
-        pass
+
+        logger.debug(f"Copy: checking content for path: {self.path}")
+
+        # Fail if the target is a directory
+        if os.path.isdir(self.path):
+            logger.error(f"Target for 'content' is a directory: {self.path}")
+            return 1
+
+        # Check content for the target, if it exists
+        current_content = None
+        if os.path.exists(self.path):
+            # Target exists - read content for comparison
+            logger.debug("Content: target exists. Reading content")
+            with open(self.path, "r") as file:
+                current_content = file.read()
+
+        # Determine whether we should write content
+        if current_content is None or current_content != self.content:
+            logger.debug("Target missing or requires updating. Writing.")
+
+            with open(self.path, "w") as file:
+                file.write(self.content)
+        else:
+            logger.debug("Target did not require updating")
+
+        return 0
+
 
 class ConfigTask:
     def __init__(self, task_def, session):
@@ -58,8 +99,9 @@ class ConfigTask:
 
         # Extract common properties
         self.creates = obslib.extract_property(task_def, "creates", optional=True, default=None)
-        self.creates = self.session.resolve(self.creates, (str, type(None)))
-        if self.creates = "":
+        if self.creates is not None:
+            self.creates = self.session.resolve(self.creates, (str, type(None)))
+        if self.creates == "":
             self.creates = None
 
         # Make sure there is only a single key defined on the task now
@@ -71,9 +113,9 @@ class ConfigTask:
         if task_name == "exec":
             task_value = obslib.extract_property(task_def, "exec")
             self.impl = ConfigTaskExec(task_value, self)
-        elif task_name == "content":
-            task_value = obslib.extract_property(task_def, "content")
-            self.impl = ConfigTaskContent(task_value, self)
+        elif task_name == "copy":
+            task_value = obslib.extract_property(task_def, "copy")
+            self.impl = ConfigTaskCopy(task_value, self)
         else:
             raise ValueError(f"Invalid task name defined on task: {task_name}")
 
@@ -204,10 +246,10 @@ class QSVMSession():
 
         # Make sure there are no other keys left
         if len(vm_config.keys()) > 0:
-            raise ValueError(f"Unknown keys in VM configuration: {content.keys()}")
+            raise ValueError(f"Unknown keys in VM configuration: {vm_config.keys()}")
 
         if len(qsvm_config.keys()) > 0:
-            raise ValueError(f"Unknown keys in QSVM configuration: {content.keys()}")
+            raise ValueError(f"Unknown keys in QSVM configuration: {qsvm_config.keys()}")
 
         # Change to the working directory
         if not os.path.exists(workingdir):
@@ -235,7 +277,12 @@ def run_systemctl(user, args):
     cmd = cmd + args
 
     logger.debug(f"Calling systemctl: {shlex.join(cmd)}")
-    ret = subprocess.run(cmd, check=True)
+    sys.stdout.flush()
+    ret = subprocess.run(cmd)
+
+    if ret.returncode != 0:
+        logger.error(f"Systemctl returned non-zero: {ret.returncode}")
+        return 1
 
     return 0
 
@@ -411,7 +458,7 @@ def process_internal_prestart_vm(args):
     # Run the tasks
     for task_def in vm_session.prestart:
         if task_def.run() != 0:
-            logger.error("Task in poststart failed")
+            logger.error("Task in prestart failed")
             return 1
 
     return 0
