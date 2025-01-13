@@ -12,6 +12,7 @@ import psutil
 import signal
 import time
 import obslib
+import socket
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +319,14 @@ class QSVMSession():
         exec_cmd = obslib.extract_property(vm_config, "exec")
         exec_cmd = session.resolve(exec_cmd, str)
 
+        # Extract qemu monitor config
+        qemu_mon_path = obslib.extract_property(vm_config, "qemu_mon_path", optional=True, default="qemu-mon")
+        qemu_mon_path = session.resolve(qemu_mon_path, (str, type(None)))
+
+        # Extract qemu monitor config
+        qemu_guest_path = obslib.extract_property(vm_config, "qemu_guest_path", optional=True, default="qemu-guest")
+        qemu_guest_path = session.resolve(qemu_guest_path, (str, type(None)))
+
         # Extract prestart command
         prestart = obslib.extract_property(vm_config, "prestart", optional=True, default=[])
         prestart = obslib.coerce_value(prestart, (list, type(None)))
@@ -347,10 +356,31 @@ class QSVMSession():
 
         os.chdir(workingdir)
 
+        # Process command line
+        exec_cmd = shlex.split(exec_cmd)
+
+        if qemu_mon_path is not None and qemu_mon_path != "":
+            exec_cmd = exec_cmd + [
+                "-qmp",
+                f"unix:{qemu_mon_path},server,wait=off"
+            ]
+
+        if qemu_guest_path is not None and qemu_guest_path != "":
+            exec_cmd = exec_cmd + [
+                "-chardev",
+                f"socket,path={qemu_guest_path},server=on,wait=off,id=qga0",
+                "-device",
+                "virtio-serial",
+                "-device",
+                "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0"
+            ]
+
         # Properties for the config object
         self.config_vars = config_vars
         self.workingdir = workingdir
-        self.exec_cmd = shlex.split(exec_cmd)
+        self.exec_cmd = exec_cmd
+        self.qemu_mon_path = qemu_mon_path
+        self.qemu_guest_path = qemu_guest_path
 
         self.prestart = prestart
         self.poststop = poststop
@@ -512,22 +542,68 @@ def process_direct_stop_vm(args):
 
     return 0
 
-def stop_vm_process():
+def stop_vm_process(vm_session):
     if ProcessState.process is None:
         return
 
-    # Send a SIGINT to try and stop the VM gracefully
+    # Open the qemu monitor socket and ask qemu to shut down the VM
+    if vm_session.qemu_mon_path is not None and vm_session.qemu_mon_path != "":
+        count = 0
+        while count < 2:
+            count = count + 1
+
+            try:
+                with socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM) as conn:
+                    path = os.path.realpath(vm_session.qemu_mon_path)
+                    logger.debug(f"Attempting shutdown using qemu monitor socket: {path}")
+
+                    conn.connect(path)
+                    conn.setblocking(False)
+                    stream = conn.makefile("rw")
+
+                    # Could do a better job of sending the requests and processing the responses, but
+                    # there isn't much to do with the responses, so they are discarded and it's best effort
+                    # to send the 'system_powerdown' command.
+
+                    # Read the initial header
+                    resp = stream.readlines()
+
+                    # Negotiate qmp capabilities
+                    stream.write("{\"execute\": \"qmp_capabilities\"}\n")
+                    stream.flush()
+                    resp = stream.readlines()
+
+                    # Send shutdown request
+                    stream.write("{\"execute\": \"system_powerdown\"}\n")
+                    stream.flush()
+                    resp = stream.readlines()
+
+                    # Now wait for the process to finish
+                    ProcessState.process.wait(timeout=30)
+
+                    # Finish here if the process has returned
+                    if ProcessState.process.returncode is not None:
+                        return
+            except Exception as e:
+                logger.error(f"Failed to shutdown VM via qemu-mon: {e}")
+
+    # Send a SIGINT to try and stop the VM
     logger.info(f"Sending SIGINT to process: {ProcessState.process.pid}")
     ProcessState.process.send_signal(signal.SIGINT)
     try:
-        ProcessState.process.wait(timeout=60)
+        ProcessState.process.wait(timeout=15)
+
+        if ProcessState.process.returncode is not None:
+            return
     except subprocess.TimeoutExpired as e:
         pass
 
-    # If it hasn't stopped yet, kill the process
-    if ProcessState.process.returncode is None:
-        logger.info(f"Sending SIGKILL to process: {ProcessState.process.pid}")
-        ProcessState.process.kill()
+    # Process is still running. Attempt to kill
+    logger.info(f"Sending SIGKILL to process: {ProcessState.process.pid}")
+    ProcessState.process.kill()
+
+    # Wait indefinitely at this point
+    ProcessState.process.wait()
 
     ProcessState.process = None
 
@@ -558,7 +634,7 @@ def process_direct_start_vm(args):
         # Stop the process, if requested
         if ProcessState.stop:
             logger.info("VM process stop requested")
-            stop_vm_process()
+            stop_vm_process(vm_session)
 
             # Break the loop and start processing poststop
             break
@@ -582,15 +658,15 @@ def process_direct_start_vm(args):
             else:
                 logger.info("VM exec cmd has changed. Restarting VM")
 
-            # Operate using the new configuration
-            vm_session = new_vm_session
-
             # Stop the VM process
-            stop_vm_process()
+            stop_vm_process(vm_session)
 
             # Run poststop
             if vm_session.run_poststop() != 0:
                 return 1
+
+            # Operate using the new configuration
+            vm_session = new_vm_session
 
             # Run prestart
             if vm_session.run_prestart() != 0:
