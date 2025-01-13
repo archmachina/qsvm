@@ -15,6 +15,103 @@ import obslib
 
 logger = logging.getLogger(__name__)
 
+ubuntu_sample = """
+---
+
+vars:
+  address: "192.168.1.0/24"
+  gateway: "192.168.1.254"
+  dns: "1.1.1.1"
+  servername: "testmachine"
+  ssh_authorized_key: "xx"
+  initial_size: "20G"
+  cloud_image: "https://cloud-images.ubuntu.com/noble/20241210/noble-server-cloudimg-amd64.img"
+
+
+exec: >
+    /usr/bin/qemu-system-x86_64
+    -machine type=q35,accel=kvm
+    -cpu host
+    -m 4G
+    -smp sockets=1,cores=2,threads=2
+    -nographic
+    -drive if=virtio,format=qcow2,file=root.img
+    -drive if=virtio,format=raw,file=cloud-init.img
+
+prestart:
+  - name: Copy cloud init network config
+    copy:
+      path: network-config.yaml
+      content: |
+        ---
+        version: 2
+        ethernets:
+          enp1s0:
+            addresses: [ "{{ address }}" ]
+            nameservers:
+              addresses:
+                - "{{ dns }}"
+            routes:
+              - to: 0.0.0.0/0
+                via: {{ gateway }}
+
+  - name: Copy cloud init user data
+    copy:
+      path: user-data.yaml
+      content: |
+        #cloud-config
+
+        users:
+          - name: ubuntu
+            groups: users, sudo
+            shell: /bin/bash
+            #ssh_authorized_keys:
+            #  - {{ ssh_authorized_key }}
+
+  - name: Copy cloud init meta data
+    copy:
+      path: meta-data.yaml
+      content: |
+        local-hostname: {{ servername }}
+
+  - name: Download ubuntu cloud image
+    creates: source.img
+    exec:
+      cmd: >
+        curl -fsSL -o source.img "{{ cloud_image }}"
+
+  - name: Create cloud-init image
+    creates: cloud-init.img
+    exec:
+      cmd: >
+        cloud-localds -v --network-config=network-config.yaml cloud-init.img user-data.yaml meta-data.yaml
+
+  - name: Create root image
+    creates: root.img
+    exec:
+      cmd: >
+        cp -v source.img root.img && qemu-img resize root.img {{ initial_size }}
+
+poststop:
+  - name: Finished
+    exec:
+      cmd: echo finished
+"""
+
+class ProcessState():
+    process = None
+    stop = False
+    refresh = False
+
+def signal_usr1(sig, frame):
+    ProcessState.refresh = True
+
+def signal_int(sig, frame):
+    ProcessState.stop = True
+
+def signal_term(sig, frame):
+    ProcessState.stop = True
+
 class ConfigTaskExec:
     def __init__(self, definition, parent):
         definition = obslib.coerce_value(definition, dict)
@@ -28,12 +125,12 @@ class ConfigTaskExec:
             raise ValueError(f"Invalid keys on exec definition: {definition.keys()}")
 
     def run(self):
-        logger.debug(f"Exec: running cmd: {self.cmd}")
+        logger.info(f"Exec: running cmd: {self.cmd}")
 
         # Run 'cmd' using shell
         sys.stdout.flush()
         ret = subprocess.run(self.cmd, shell=True)
-        logger.debug(f"Exec: return code {ret.returncode}")
+        logger.info(f"Exec: return code {ret.returncode}")
 
         if ret.returncode != 0:
             logger.error(f"Exec command returned non-zero: {ret.returncode}")
@@ -59,7 +156,7 @@ class ConfigTaskCopy:
 
     def run(self):
 
-        logger.debug(f"Copy: checking content for path: {self.path}")
+        logger.info(f"Copy: checking content for path: {self.path}")
 
         # Fail if the target is a directory
         if os.path.isdir(self.path):
@@ -98,6 +195,9 @@ class ConfigTask:
         self.session = session
 
         # Extract common properties
+        self.name = obslib.extract_property(task_def, "name")
+        self.name = self.session.resolve(self.name, str)
+
         self.creates = obslib.extract_property(task_def, "creates", optional=True, default=None)
         if self.creates is not None:
             self.creates = self.session.resolve(self.creates, (str, type(None)))
@@ -109,21 +209,27 @@ class ConfigTask:
             raise ValueError(f"Invalid number of tasks/keys defined on task. Must be one: {task_def.keys()}")
 
         # Extract the task value from the task definition
-        task_name = list(task_def.keys())[0]
-        if task_name == "exec":
+        task_type = list(task_def.keys())[0]
+        if task_type == "exec":
             task_value = obslib.extract_property(task_def, "exec")
-            self.impl = ConfigTaskExec(task_value, self)
-        elif task_name == "copy":
+            impl = ConfigTaskExec(task_value, self)
+        elif task_type == "copy":
             task_value = obslib.extract_property(task_def, "copy")
-            self.impl = ConfigTaskCopy(task_value, self)
+            impl = ConfigTaskCopy(task_value, self)
         else:
-            raise ValueError(f"Invalid task name defined on task: {task_name}")
+            raise ValueError(f"Invalid task name defined on task: {task_type}")
+
+        self.impl = impl
+        self.task_type = task_type
 
     def run(self):
         # Check if there is a creates clause for this task
         if self.creates is not None:
             if os.path.exists(self.creates):
                 return 0
+
+        logger.info("")
+        logger.info(f"Task({self.task_type}): {self.name}")
 
         return self.impl.run()
 
@@ -220,22 +326,6 @@ class QSVMSession():
 
         prestart = [ConfigTask(x, session) for x in prestart]
 
-        # Extract poststart command
-        poststart = obslib.extract_property(vm_config, "poststart", optional=True, default=[])
-        poststart = obslib.coerce_value(poststart, (list, type(None)))
-        if poststart is None:
-            poststart = []
-
-        poststart = [ConfigTask(x, session) for x in poststart]
-
-        # Extract prestop commands
-        prestop = obslib.extract_property(vm_config, "prestop", optional=True, default=[])
-        prestop = obslib.coerce_value(prestop, (list, type(None)))
-        if prestop is None:
-            prestop = []
-
-        prestop = [ConfigTask(x, session) for x in prestop]
-
         # Extract poststop commands
         poststop = obslib.extract_property(vm_config, "poststop", optional=True, default=[])
         poststop = obslib.coerce_value(poststop, (list, type(None)))
@@ -260,13 +350,26 @@ class QSVMSession():
         # Properties for the config object
         self.config_vars = config_vars
         self.workingdir = workingdir
-        self.exec_cmd = exec_cmd
+        self.exec_cmd = shlex.split(exec_cmd)
 
         self.prestart = prestart
-        self.poststart = poststart
-        self.prestop = prestop
         self.poststop = poststop
 
+    def run_prestart(self):
+        for task_def in self.prestart:
+            if task_def.run() != 0:
+                logger.error("Task in prestart failed")
+                return 1
+
+        return 0
+
+    def run_poststop(self):
+        for task_def in self.poststop:
+            if task_def.run() != 0:
+                logger.error("Task in poststop failed")
+                return 1
+
+        return 0
 
 def run_systemctl(user, args):
 
@@ -305,13 +408,8 @@ def process_install(args):
     [Service]
     Type=exec
 
-    ExecStartPre={cmd} internal-prestart-vm %i
-    ExecStart={cmd} internal-start-vm %i
-    ExecStartPost={cmd} internal-poststart-vm %i
-
-    ExecStop={cmd} internal-prestop-vm %i
-    ExecStop={cmd} internal-stop-vm %i $MAINPID
-    ExecStopPost={cmd} internal-poststop-vm %i
+    ExecStart={cmd} direct-start-vm %i
+    ExecStop={cmd} direct-stop-vm %i $MAINPID
 
     Restart=on-failure
 
@@ -360,17 +458,7 @@ def process_create(args):
     logger.debug(f"VM Config Path: {vm_config_path}")
 
     # Sample/starter configuration
-    vm_config = textwrap.dedent(f"""\
-    ---
-    # Command to run to start the VM
-    exec: >
-        /usr/bin/qemu-system-x86_64
-        -enable-kvm
-        -cpu host
-        -m 4G
-        -smp sockets=1,cores=2,threads=2
-        -nographic
-    """)
+    vm_config = ubuntu_sample
 
     # Are we just displaying to stdout?
     if args.stdout:
@@ -389,116 +477,144 @@ def process_create(args):
 
     return 0
 
-def process_internal_stop_vm(args):
+def process_direct_stop_vm(args):
+
+    # Read the VM configuration
+    try:
+        vm_session = QSVMSession(args.config, args.vm)
+    except Exception as e:
+        logger.error(f"Failed to read VM configuration: {e}")
+
+    # Shutdown delay
+    shutdown_delay = 60
 
     # Process to stop
     pid = args.pid
 
-    # Read the VM configuration
-    vm_session = QSVMSession(args.config, args.vm)
-
     # Make sure the process exists
     if not psutil.pid_exists(pid):
-        logger.error(f"PID for qemu process does not exist: {pid}")
+        logger.error(f"PID for qsvm process does not exist: {pid}")
         return 1
 
     # Attempt to stop the process with SIGINT
     os.kill(pid, signal.SIGINT)
 
     # Wait for the process to exit
-    for i in range(60):
+    count = 0
+    while count < 60:
         if not psutil.pid_exists(pid):
-            break
+            return 0
 
         time.sleep(1)
-
-    # Finish here if the process exited
-    if not psutil.pid_exists(pid):
-        logger.info(f"Process ({pid}) has exited from SIGINT")
-        return 0
 
     # Process is still active - send kill signal
     os.kill(pid, signal.SIGKILL)
 
-    # Wait for the process to exit
-    for i in range(15):
-        if not psutil.pid_exists(pid):
-            break
+    return 0
 
-        time.sleep(1)
+def stop_vm_process():
+    if ProcessState.process is None:
+        return
 
-    # Finish here if the process exited
-    if not psutil.pid_exists(pid):
-        logger.info(f"Process ({pid}) has exited from SIGKILL.")
-        return 0
+    # Send a SIGINT to try and stop the VM gracefully
+    logger.info(f"Sending SIGINT to process: {ProcessState.process.pid}")
+    ProcessState.process.send_signal(signal.SIGINT)
+    try:
+        ProcessState.process.wait(timeout=60)
+    except subprocess.TimeoutExpired as e:
+        pass
 
-    # Shouldn't still be alive after a SIGKILL
-    logger.error(f"Process ({pid}) did not exit from SIGINT or SIGKILL")
-    return 1
+    # If it hasn't stopped yet, kill the process
+    if ProcessState.process.returncode is None:
+        logger.info(f"Sending SIGKILL to process: {ProcessState.process.pid}")
+        ProcessState.process.kill()
 
-def process_internal_start_vm(args):
+    ProcessState.process = None
+
+def process_direct_start_vm(args):
 
     # Read the VM configuration
     vm_session = QSVMSession(args.config, args.vm)
+
+    # Run prestart tasks
+    if vm_session.run_prestart() != 0:
+        return 1
+
+    # Register signals
+    signal.signal(signal.SIGUSR1, signal_usr1)
+    signal.signal(signal.SIGINT, signal_int)
+    signal.signal(signal.SIGTERM, signal_term)
 
     # Start the VM
-    exec_args = shlex.split(vm_session.exec_cmd)
-    logger.debug(f"Exec: {exec_args}")
-    os.execvp(exec_args[0], exec_args)
+    logger.info(f"VM exec: {vm_session.exec_cmd}")
+    ProcessState.process = subprocess.Popen(vm_session.exec_cmd)
+    logger.info(f"Monitoring VM process: {ProcessState.process.pid}")
 
-    # Shouldn't get here unless the execvp call failed
-    logger.error("Exec call failed or returned")
-    return 1
+    while True:
+        # If there is no process any more, stop here
+        if ProcessState.process is None:
+            break
 
-def process_internal_prestart_vm(args):
+        # Stop the process, if requested
+        if ProcessState.stop:
+            logger.info("VM process stop requested")
+            stop_vm_process()
 
-    # Read the VM configuration
-    vm_session = QSVMSession(args.config, args.vm)
+            # Break the loop and start processing poststop
+            break
 
-    # Run the tasks
-    for task_def in vm_session.prestart:
-        if task_def.run() != 0:
-            logger.error("Task in prestart failed")
-            return 1
+        # Handle refresh, which checks for differences in exec command
+        if ProcessState.refresh:
+            ProcessState.refresh = False
+            logger.info("VM process refresh requested")
 
-    return 0
+            # Reread the configuration and compare the exec command
+            try:
+                new_vm_session = QSVMSession(args.config, args.vm)
+            except Exception as e:
+                logger.error(f"Failure to reload configuration: {e}")
+                continue
 
-def process_internal_poststart_vm(args):
+            # Exit here if the exec commands are identical
+            if new_vm_session.exec_cmd == vm_session.exec_cmd:
+                logger.info("VM exec cmd has not changed")
+                continue
+            else:
+                logger.info("VM exec cmd has changed. Restarting VM")
 
-    # Read the VM configuration
-    vm_session = QSVMSession(args.config, args.vm)
+            # Operate using the new configuration
+            vm_session = new_vm_session
 
-    # Run the tasks
-    for task_def in vm_session.poststart:
-        if task_def.run() != 0:
-            logger.error("Task in poststart failed")
-            return 1
+            # Stop the VM process
+            stop_vm_process()
 
-    return 0
+            # Run poststop
+            if vm_session.run_poststop() != 0:
+                return 1
 
-def process_internal_prestop_vm(args):
+            # Run prestart
+            if vm_session.run_prestart() != 0:
+                return 1
 
-    # Read the VM configuration
-    vm_session = QSVMSession(args.config, args.vm)
+            # Start the VM process
+            logger.info(f"VM exec: {vm_session.exec_cmd}")
+            ProcessState.process = subprocess.Popen(vm_session.exec_cmd)
 
-    # Run the tasks
-    for task_def in vm_session.prestop:
-        if task_def.run() != 0:
-            logger.error("Task in prestop failed")
-            return 1
+        # Wait for the process to finish (or we're interrupted by a signal)
+        try:
+            ProcessState.process.wait(timeout=2)
+        except subprocess.TimeoutExpired as e:
+            pass
 
-    return 0
+        if ProcessState.process.returncode is not None:
+            # Process has finished
+            logger.info(f"QEMU returned {ProcessState.process.returncode}")
+            ProcessState.process = None
+            break
 
-def process_internal_poststop_vm(args):
-
-    # Read the VM configuration
-    vm_session = QSVMSession(args.config, args.vm)
-
-    # Run the tasks
-    for task_def in vm_session.poststop:
-        if task_def.run() != 0:
-            logger.error("Task in poststop failed")
-            return 1
+    # Run poststop tasks
+    if vm_session.run_poststop() != 0:
+        return 1
 
     return 0
 
@@ -552,43 +668,19 @@ def process_args():
 
     sub_create.add_argument("vm", action="store", help="VM name to create")
 
-    # Internal prestart subcommand
-    sub_internal_prestart_vm = subparsers.add_parser("internal-prestart-vm", help="Called by systemd unit before starting a VM - Not intended to be called by the user")
-    sub_internal_prestart_vm.set_defaults(call_func=process_internal_prestart_vm)
-
-    sub_internal_prestart_vm.add_argument("vm", action="store", help="VM name for prestart")
-
-    # Internal poststart subcommand
-    sub_internal_poststart_vm = subparsers.add_parser("internal-poststart-vm", help="Called by systemd unit before starting a VM - Not intended to be called by the user")
-    sub_internal_poststart_vm.set_defaults(call_func=process_internal_poststart_vm)
-
-    sub_internal_poststart_vm.add_argument("vm", action="store", help="VM name for poststart")
-
     # Internal Start subcommand
-    sub_internal_start_vm = subparsers.add_parser("internal-start-vm", help="Called by systemd unit to start a VM - Not intended to be called by the user")
-    sub_internal_start_vm.set_defaults(call_func=process_internal_start_vm)
+    sub_direct_start_vm = subparsers.add_parser("direct-start-vm", help="Start VM directly. Normally called by systemd")
+    sub_direct_start_vm.set_defaults(call_func=process_direct_start_vm)
 
-    sub_internal_start_vm.add_argument("vm", action="store", help="VM name to start")
-
-    # Internal prestop subcommand
-    sub_internal_prestop_vm = subparsers.add_parser("internal-prestop-vm", help="Called by systemd unit before stoping a VM - Not intended to be called by the user")
-    sub_internal_prestop_vm.set_defaults(call_func=process_internal_prestop_vm)
-
-    sub_internal_prestop_vm.add_argument("vm", action="store", help="VM name for prestop")
-
-    # Internal poststop subcommand
-    sub_internal_poststop_vm = subparsers.add_parser("internal-poststop-vm", help="Called by systemd unit before stoping a VM - Not intended to be called by the user")
-    sub_internal_poststop_vm.set_defaults(call_func=process_internal_poststop_vm)
-
-    sub_internal_poststop_vm.add_argument("vm", action="store", help="VM name for poststop")
+    sub_direct_start_vm.add_argument("vm", action="store", help="VM name to start")
 
     # Internal Stop subcommand
-    sub_internal_stop_vm = subparsers.add_parser("internal-stop-vm", help="Called by systemd unit to stop a VM - Not intended to be called by the user")
-    sub_internal_stop_vm.set_defaults(call_func=process_internal_stop_vm)
+    sub_direct_stop_vm = subparsers.add_parser("direct-stop-vm", help="Direct stop VM by PID. Normally called by systemd")
+    sub_direct_stop_vm.set_defaults(call_func=process_direct_stop_vm)
 
-    sub_internal_stop_vm.add_argument("vm", action="store", help="VM name to stop")
+    sub_direct_stop_vm.add_argument("vm", action="store", help="VM name to stop")
 
-    sub_internal_stop_vm.add_argument("pid", action="store", type=int, help="PID of qemu process")
+    sub_direct_stop_vm.add_argument("pid", action="store", type=int, help="PID of qemu process")
 
     # start command
     sub_start = subparsers.add_parser("start", help="Start a VM using systemd")
