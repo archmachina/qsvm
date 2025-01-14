@@ -5,11 +5,6 @@ env:
   GITHUB_OWNER: archmachina
   GITHUB_REPO: qsvm
 
-  # Registry release parameters
-  REGISTRY_USERNAME: archmachina
-  REGISTRY_HOST: docker.io
-  REGISTRY_IMAGE: "docker.io/archmachina/qsvm"
-
 steps:
   #
   # Versioning steps
@@ -72,80 +67,6 @@ steps:
       TWINE_USERNAME: "__token__"
       TWINE_PASSWORD: $SECRET_PYPI_TOKEN
 
-  #
-  # Docker mgmt steps
-  #
-
-  docker_build_version:
-    type: bash
-    command: echo "$(date -u --iso-8601=s) git:$(git log -1 --format=%h) $SEMVER_FULL"
-    capture: BUILD_VERSION
-    capture_strip: true
-
-  # Perform a docker build of the image
-  docker_build:
-    type: bash
-    depends_on:
-      - docker_build_version
-    command: docker build --build-arg BUILD_VERSION="${BUILD_VERSION}" -f src/Dockerfile src
-
-  # Perform a docker build and capture the SHA of the resulting build (-q argument)
-  docker_build_sha:
-    type: bash
-    depends_on:
-      - docker_build
-      - docker_build_version
-    command: docker build --build-arg BUILD_VERSION="${BUILD_VERSION}" -q -f src/Dockerfile src
-    capture: DOCKER_IMAGE_SHA
-    capture_strip: true
-
-  docker_login:
-    type: bash
-    env:
-      REGISTRY_TOKEN: $SECRET_REGISTRY_TOKEN
-    command: docker login --password-stdin -u "${REGISTRY_USERNAME}" "${REGISTRY_HOST}" < <(echo "${REGISTRY_TOKEN}")
-
-  docker_expand_tags:
-    type: bash
-    command: |
-      set -e
-      set -o pipefail
-
-      # The '+' character isn't valid in a docker tag name, so replace with an
-      # underscore.
-      SEMVER_FULL=${SEMVER_FULL//+/_/}
-
-      # Define all of the tags that will apply for this image
-      if [ "$SEMVER_FULL" != "" ] ; then
-        TAG_VERSIONS="$TAG_VERSIONS ${SEMVER_FULL}"
-        [ "$SEMVER_PRERELEASE" == "" ] && TAG_VERSIONS="$TAG_VERSIONS ${SEMVER_MAJOR}"
-        [ "$SEMVER_PRERELEASE" == "" ] && TAG_VERSIONS="$TAG_VERSIONS ${SEMVER_MAJOR}.${SEMVER_MINOR}"
-        [ "$SEMVER_PRERELEASE" == "" ] && TAG_VERSIONS="$TAG_VERSIONS ${SEMVER_MAJOR}.${SEMVER_MINOR}.${SEMVER_PATCH}"
-      fi
-
-      echo $TAG_VERSIONS
-    capture: TAG_VERSIONS
-    capture_strip: true
-
-  docker_registry_push:
-    type: command
-    interpreter: /bin/bash
-    depends_on:
-      - docker_build_sha
-      - docker_login
-    command: |
-      set -e
-      set -o pipefail
-
-      echo "Tag Versions: $TAG_VERSIONS"
-      for TAG in $TAG_VERSIONS ; do
-        [ "$TAG" == "" ] && continue
-
-        # Tag and push the image defined earlier
-        docker tag "${DOCKER_IMAGE_SHA}" "${REGISTRY_IMAGE}:${TAG}"
-        docker push "${REGISTRY_IMAGE}:${TAG}"
-      done
-
 actions:
   clean:
     steps:
@@ -156,20 +77,16 @@ actions:
     steps:
       # Generate a rolling version for this build
       - semver_rolling_version
-      # Call parse_semver explicitly here so that docker_build_version can include it in the BUILD_VERSION var
       - parse_semver
       - python_build
-      - docker_build
 
   # Steps for a pull request to the main branch
   pr_branch_main:
     steps:
       # Generate a rolling version for this build
       - semver_rolling_version
-      # Call parse_semver explicitly here so that docker_build_version can include it in the BUILD_VERSION var
       - parse_semver
       - python_build
-      - docker_build
 
   # Steps to perform when building on main branch
   push_branch_main:
@@ -179,10 +96,8 @@ actions:
     steps:
       # Generate a rolling version for this build
       - semver_rolling_version
-      # Call parse_semver explicitly here so that docker_build_version can include it in the BUILD_VERSION var
       - parse_semver
       - python_build
-      - docker_registry_push
 
   # Steps to perform when building from a git tag v*
   push_tag_v:
@@ -190,12 +105,9 @@ actions:
       # Take the semver version from GITHUB_REF by default
       SEMVER_SOURCE: $GITHUB_REF
     steps:
-      # Call parse_semver explicitly here so that docker_build_version can include it in the BUILD_VERSION var
       - parse_semver
       # Expand tags will include additional version tags in the TAG_VERSIONS var based on the semver version
       - pypi_release
-      - docker_expand_tags
-      - docker_registry_push
       - name: github_release
         type: github_release
         owner: $GITHUB_OWNER
@@ -211,3 +123,4 @@ actions:
           }
         env:
           GITHUB_TOKEN: $SECRET_GITHUB_TOKEN
+
