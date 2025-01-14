@@ -936,6 +936,18 @@ def process_args():
     verbose = args.verbose
     subcommand = args.subcommand
 
+    # Logging configuration
+    level = logging.INFO
+    if verbose:
+        level = logging.DEBUG
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+    logger = logging.getLogger(__name__)
+
+    # Exit here if there is no subcommand
+    if subcommand is None or subcommand == "" or args.call_func is None:
+        logger.warning("Missing subcommand")
+        return 1
+
     # Configuration directory
     if args.config is None or args.config == "":
         args.config = "/etc/qsvm/"
@@ -945,17 +957,6 @@ def process_args():
     # Create the config directory, if it doesn't exist
     if not os.path.exists(args.config):
         os.makedirs(args.config)
-
-    # Logging configuration
-    level = logging.INFO
-    if verbose:
-        level = logging.DEBUG
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
-    logger = logging.getLogger(__name__)
-
-    if subcommand is None or subcommand == "" or args.call_func is None:
-        logger.warning("Missing subcommand")
-        return 1
 
     return args.call_func(args)
 
