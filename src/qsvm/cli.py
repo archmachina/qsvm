@@ -80,10 +80,23 @@ exec: >
     {{ graphic_opt }}
     -drive if=virtio,format=qcow2,file=root.img
     -drive if=virtio,format=raw,file=cloud-init.img
+    -drive if=virtio,format=qcow2,file=data.img
     -netdev user,id=net0,net=192.168.0.0/24,dhcpstart=192.168.0.50
     -device virtio-net-pci,netdev=net0
 
 prestart:
+  - name: Configure drives
+    drives:
+      items:
+        - path: source.img
+          url: "{{ cloud_image }}"
+        - path: root.img
+          copy: source.img
+          size: 15G
+        - path: data.img
+          format: qcow2
+          size: 5G
+
   - name: Copy cloud init network config
     copy:
       path: network-config.yaml
@@ -99,26 +112,13 @@ prestart:
       path: meta-data.yaml
       content: "{{ meta_data }}"
 
-  # Download the cloud image for the machine
-  # 'Creates' stops the exec from running if the image is already present
-  - name: Download ubuntu cloud image
-    creates: source.img
-    exec:
-      cmd: >
-        curl -fsSL -o source.img "{{ cloud_image }}"
-
   # Create the cloud-init image on every startup
   - name: Create cloud-init image
+    # Uncomment if you only want it to create cloud-init.img, if it's missing
+    # creates: cloud-init.img
     exec:
       cmd: >
         cloud-localds -v --network-config=network-config.yaml cloud-init.img user-data.yaml meta-data.yaml
-
-  # Only create the root image if it doesn't already exist
-  - name: Create root image
-    creates: root.img
-    exec:
-      cmd: >
-        cp -v source.img root.img && qemu-img resize root.img {{ initial_size }}
 
 poststop:
   # Nothing useful here, just example
