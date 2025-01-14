@@ -13,6 +13,8 @@ import signal
 import time
 import obslib
 import socket
+import shutil
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +179,100 @@ class ConfigTaskExec:
 
         return 0
 
+class ConfigTaskDrivesItem:
+    def __init__(self, definition, parent):
+        definition = obslib.coerce_value(definition, dict)
+
+        # Extract path property
+        self.path = obslib.extract_property(definition, "path")
+        self.path = parent.session.resolve(self.path, str)
+
+        # Extract url property
+        self.url = obslib.extract_property(definition, "url", optional=True, default=None)
+        if self.url is not None:
+            self.url = parent.session.resolve(self.url, (str, type(None)))
+
+        # Extract copy property
+        self.copy = obslib.extract_property(definition, "copy", optional=True, default=None)
+        if self.copy is not None:
+            self.copy = parent.session.resolve(self.copy, (str, type(None)))
+
+        # Extract size property
+        self.size = obslib.extract_property(definition, "size", optional=True, default=None)
+        if self.size is not None:
+            self.size = parent.session.resolve(self.size, (str, type(None)))
+
+        # Extract format property
+        self.format = obslib.extract_property(definition, "format", optional=True, default="qcow2")
+
+        if self.format is not None:
+            self.format = parent.session.resolve(self.format, str)
+
+        if self.format is None or self.format == "":
+            raise ValueError("Invalid format on drive specification")
+
+    def run(self):
+        logger.info(f"Processing drive task for {self.path}")
+
+        # Check if the image is already present
+        if not os.path.exists(self.path):
+            if self.url is not None and self.url != "":
+                logger.info(f"Downloading {self.url} to {self.path}")
+                urllib.request.urlretrieve(self.url, self.path)
+            elif self.copy is not None and self.copy != "":
+                if not os.path.exists(self.copy):
+                    logger.error(f"Source for copy does not exist: {self.copy}")
+                    return 1
+
+                logger.info(f"Copying {self.copy} to {self.path}")
+                shutil.copy(self.copy, self.path)
+
+        # If 'size' is defined, we update the existing image size or
+        # create it, if it doesn't exist
+        if self.size is not None and self.size != "":
+            if os.path.exists(self.path):
+                logger.info(f"Resizeing {self.path} to {self.size}")
+
+                sys.stdout.flush()
+                ret = subprocess.run([
+                    "qemu-img", "resize", self.path, self.size
+                ])
+            else:
+                logger.info(f"Creating image {self.path}")
+
+                sys.stdout.flush()
+                ret = subprocess.run([
+                    "qemu-img", "create", "-f", self.format, self.path, self.size
+                ])
+
+            if ret.returncode != 0:
+                logger.error(f"qemu-img returned non zero: {ret.returncode}")
+                return 1
+
+        return 0
+
+class ConfigTaskDrives:
+    def __init__(self, definition, parent):
+        definition = obslib.coerce_value(definition, dict)
+
+        # Extract items property
+        self.items = obslib.extract_property(definition, "items")
+        self.items = parent.session.resolve(self.items, list)
+
+        # Convert each item to a ConfigTaskDrivesItem object
+        self.items = [ConfigTaskDrivesItem(x, parent) for x in self.items]
+
+        # Make sure there are no unknown values
+        if len(definition.keys()) > 0:
+            raise ValueError(f"Invalid keys on exec definition: {definition.keys()}")
+
+    def run(self):
+        for drive_item in self.items:
+            if drive_item.run() != 0:
+                return 1
+
+        return 0
+
 class ConfigTaskCopy:
     def __init__(self, definition, parent):
         definition = obslib.coerce_value(definition, dict)
@@ -255,6 +351,9 @@ class ConfigTask:
         elif task_type == "copy":
             task_value = obslib.extract_property(task_def, "copy")
             impl = ConfigTaskCopy(task_value, self)
+        elif task_type == "drives":
+            task_value = obslib.extract_property(task_def, "drives")
+            impl = ConfigTaskDrives(task_value, self)
         else:
             raise ValueError(f"Invalid task name defined on task: {task_type}")
 
