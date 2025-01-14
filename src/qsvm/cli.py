@@ -235,7 +235,7 @@ class ConfigTask:
         return self.impl.run()
 
 class QSVMSession():
-    def __init__(self, path, vmname):
+    def __init__(self, path, vmname, is_svc):
 
         # Check incoming arguments
         if not isinstance(path, str) or path == "":
@@ -244,8 +244,12 @@ class QSVMSession():
         if not isinstance(vmname, str) or vmname == "":
             raise ValueError("Invalid vmname passed to QSVMSession")
 
+        if not isinstance(is_svc, bool):
+            raise ValueError("Invalid is_svc passed to QSVMSession")
+
         # Config paths
         qsvm_config_path = os.path.join(path, "qsvm.yaml")
+        vm_config_dir = os.path.join(path, vmname)
         vm_config_path = os.path.join(path, vmname, "config.yaml")
 
         # Read qsvm configuration
@@ -286,16 +290,19 @@ class QSVMSession():
         config_vars.update(vm_vars)
 
         # Add standard vars
-        vm_vars["qsvm"] = {
+        config_vars["qsvm"] = {
             "vmname": vmname,
-            "config_path": vm_config_path
+            "config_dir": vm_config_dir,
+            "config_path": vm_config_path,
+            "pid": os.getpid(),
+            "is_svc": is_svc
         }
 
-        vm_vars["env"] = os.environ.copy()
+        config_vars["env"] = os.environ.copy()
 
         # Resolve reference in config vars and create a session to allow var reference resolving
         config_vars = obslib.eval_vars(config_vars)
-        session = obslib.Session(template_vars=vm_vars)
+        session = obslib.Session(template_vars=config_vars)
 
         # Extract working directory configuration
         # 'None' means use the VM directory as working dir. Empty string is converted to None
@@ -438,8 +445,8 @@ def process_install(args):
     [Service]
     Type=exec
 
-    ExecStart={cmd} direct-start-vm %i
-    ExecStop={cmd} direct-stop-vm %i $MAINPID
+    ExecStart={cmd} direct-start-vm --is_svc %i
+    ExecStop={cmd} direct-stop-vm --is_svc %i $MAINPID
 
     Restart=on-failure
 
@@ -456,7 +463,7 @@ def process_install(args):
     unit_location = f"/etc/systemd/system/{args.svc}@.service"
     if args.user:
         # Create the user unit path directory, if it doesn't exist
-        unit_path = "~/.config/systemd/user"
+        unit_path = os.path.expanduser("~/.config/systemd/user")
         if not os.path.exists(unit_path):
             os.makedirs(unit_path)
 
@@ -511,7 +518,7 @@ def process_direct_stop_vm(args):
 
     # Read the VM configuration
     try:
-        vm_session = QSVMSession(args.config, args.vm)
+        vm_session = QSVMSession(args.config, args.vm, args.is_svc)
     except Exception as e:
         logger.error(f"Failed to read VM configuration: {e}")
 
@@ -531,7 +538,7 @@ def process_direct_stop_vm(args):
 
     # Wait for the process to exit
     count = 0
-    while count < 60:
+    while count < 90:
         if not psutil.pid_exists(pid):
             return 0
 
@@ -610,7 +617,7 @@ def stop_vm_process(vm_session):
 def process_direct_start_vm(args):
 
     # Read the VM configuration
-    vm_session = QSVMSession(args.config, args.vm)
+    vm_session = QSVMSession(args.config, args.vm, args.is_svc)
 
     # Run prestart tasks
     if vm_session.run_prestart() != 0:
@@ -646,7 +653,7 @@ def process_direct_start_vm(args):
 
             # Reread the configuration and compare the exec command
             try:
-                new_vm_session = QSVMSession(args.config, args.vm)
+                new_vm_session = QSVMSession(args.config, args.vm, args.is_svc)
             except Exception as e:
                 logger.error(f"Failure to reload configuration: {e}")
                 continue
@@ -749,6 +756,8 @@ def process_args():
     sub_direct_start_vm.set_defaults(call_func=process_direct_start_vm)
 
     sub_direct_start_vm.add_argument("vm", action="store", help="VM name to start")
+
+    sub_direct_start_vm.add_argument("--is_svc", action="store_true", help="Direct start from svc (systemd) - set when called from systemd")
 
     # Internal Stop subcommand
     sub_direct_stop_vm = subparsers.add_parser("direct-stop-vm", help="Direct stop VM by PID. Normally called by systemd")
