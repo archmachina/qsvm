@@ -25,7 +25,7 @@ vars:
   address: "192.168.1.0/24"
   gateway: "192.168.1.254"
   dns: "1.1.1.1"
-  graphic_opt: "{{ '-nographic' if qsvm.is_svc else '' }}"
+  graphic_opt: "{{ '-nographic' if qsvm.is_svc else '-monitor stdio' }}"
   # Example SSH key
   ssh_authorized_key: "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBNYnsmdUpDPjjCmicJYvDNos2XADUAbJzuI57j81oSJEpX1vKguMhCK1Nfln7Ycm5aKAKi5JESiwHgXwjbI2db0= sample@somewhere"
   initial_size: "20G"
@@ -231,7 +231,7 @@ class ConfigTaskDrivesItem:
         # create it, if it doesn't exist
         if self.size is not None and self.size != "":
             if os.path.exists(self.path):
-                logger.info(f"Resizeing {self.path} to {self.size}")
+                logger.info(f"Resizing {self.path} to {self.size}")
 
                 sys.stdout.flush()
                 ret = subprocess.run([
@@ -766,7 +766,7 @@ def process_direct_start_vm(args):
     signal.signal(signal.SIGTERM, signal_term)
 
     # Start the VM
-    logger.info(f"VM exec: {vm_session.exec_cmd}")
+    logger.info(f"VM exec: {' '.join(vm_session.exec_cmd)}")
     sys.stdout.flush()
     ProcessState.process = subprocess.Popen(vm_session.exec_cmd)
     logger.info(f"Monitoring VM process: {ProcessState.process.pid}")
