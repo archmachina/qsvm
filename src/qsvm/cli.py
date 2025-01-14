@@ -23,6 +23,7 @@ vars:
   address: "192.168.1.0/24"
   gateway: "192.168.1.254"
   dns: "1.1.1.1"
+  graphic_opt: "{{ '-nographic' if qsvm.is_svc else '' }}"
   # Example SSH key
   ssh_authorized_key: "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBNYnsmdUpDPjjCmicJYvDNos2XADUAbJzuI57j81oSJEpX1vKguMhCK1Nfln7Ycm5aKAKi5JESiwHgXwjbI2db0= sample@somewhere"
   initial_size: "20G"
@@ -74,7 +75,7 @@ exec: >
     -cpu host
     -m 4G
     -smp sockets=1,cores=2,threads=2
-    -nographic
+    {{ graphic_opt }}
     -drive if=virtio,format=qcow2,file=root.img
     -drive if=virtio,format=raw,file=cloud-init.img
     -netdev user,id=net0,net=192.168.0.0/24,dhcpstart=192.168.0.50
@@ -656,6 +657,7 @@ def process_direct_start_vm(args):
 
     # Start the VM
     logger.info(f"VM exec: {vm_session.exec_cmd}")
+    sys.stdout.flush()
     ProcessState.process = subprocess.Popen(vm_session.exec_cmd)
     logger.info(f"Monitoring VM process: {ProcessState.process.pid}")
 
@@ -707,6 +709,7 @@ def process_direct_start_vm(args):
 
             # Start the VM process
             logger.info(f"VM exec: {vm_session.exec_cmd}")
+            sys.stdout.flush()
             ProcessState.process = subprocess.Popen(vm_session.exec_cmd)
 
         # Wait for the process to finish (or we're interrupted by a signal)
