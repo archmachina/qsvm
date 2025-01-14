@@ -23,11 +23,50 @@ vars:
   address: "192.168.1.0/24"
   gateway: "192.168.1.254"
   dns: "1.1.1.1"
-  servername: "testmachine"
-  ssh_authorized_key: "xx"
+  # Example SSH key
+  ssh_authorized_key: "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBNYnsmdUpDPjjCmicJYvDNos2XADUAbJzuI57j81oSJEpX1vKguMhCK1Nfln7Ycm5aKAKi5JESiwHgXwjbI2db0= sample@somewhere"
   initial_size: "20G"
   cloud_image: "https://cloud-images.ubuntu.com/noble/20241210/noble-server-cloudimg-amd64.img"
+  interface: "enp0s2"
 
+  network_config: |
+    ---
+    version: 2
+    ethernets:
+      {{ interface }}:
+        dhcp4: true
+        # addresses: [ "{{ address }}" ]
+        nameservers:
+          addresses:
+            - "{{ dns }}"
+        # routes:
+        #   - to: 0.0.0.0/0
+        #     via: {{ gateway }}
+
+  meta_data: |
+    local-hostname: {{ qsvm.vmname }}
+
+  user_data: |
+    #cloud-config
+    user: ubuntu
+    password: "Password12"
+    chpasswd:
+      expire: False
+    users:
+      - name: ubuntu
+        groups: users, sudo
+        shell: /bin/bash
+        plain_text_passwd: "Password12"
+        ssh_authorized_keys:
+          - {{ ssh_authorized_key }}
+
+
+# If we're called as a service, use qemu-mon for monitor, which
+# also allows graceful shutdown. If interactive, disable the monitor
+# which allows the Ctrl-A X or Ctrl-A C combinations.
+# Default is 'qemu-mon', which unconditionally enables the monitor
+# socket.
+qemu_mon_path: "{{ 'qemu-mon' if qsvm.is_svc else '' }}"
 
 exec: >
     /usr/bin/qemu-system-x86_64
@@ -38,55 +77,40 @@ exec: >
     -nographic
     -drive if=virtio,format=qcow2,file=root.img
     -drive if=virtio,format=raw,file=cloud-init.img
+    -netdev user,id=net0,net=192.168.0.0/24,dhcpstart=192.168.0.50
+    -device virtio-net-pci,netdev=net0
 
 prestart:
   - name: Copy cloud init network config
     copy:
       path: network-config.yaml
-      content: |
-        ---
-        version: 2
-        ethernets:
-          enp1s0:
-            addresses: [ "{{ address }}" ]
-            nameservers:
-              addresses:
-                - "{{ dns }}"
-            routes:
-              - to: 0.0.0.0/0
-                via: {{ gateway }}
+      content: "{{ network_config }}"
 
   - name: Copy cloud init user data
     copy:
       path: user-data.yaml
-      content: |
-        #cloud-config
-
-        users:
-          - name: ubuntu
-            groups: users, sudo
-            shell: /bin/bash
-            #ssh_authorized_keys:
-            #  - {{ ssh_authorized_key }}
+      content: "{{ user_data }}"
 
   - name: Copy cloud init meta data
     copy:
       path: meta-data.yaml
-      content: |
-        local-hostname: {{ servername }}
+      content: "{{ meta_data }}"
 
+  # Download the cloud image for the machine
+  # 'Creates' stops the exec from running if the image is already present
   - name: Download ubuntu cloud image
     creates: source.img
     exec:
       cmd: >
         curl -fsSL -o source.img "{{ cloud_image }}"
 
+  # Create the cloud-init image on every startup
   - name: Create cloud-init image
-    creates: cloud-init.img
     exec:
       cmd: >
         cloud-localds -v --network-config=network-config.yaml cloud-init.img user-data.yaml meta-data.yaml
 
+  # Only create the root image if it doesn't already exist
   - name: Create root image
     creates: root.img
     exec:
@@ -94,9 +118,11 @@ prestart:
         cp -v source.img root.img && qemu-img resize root.img {{ initial_size }}
 
 poststop:
+  # Nothing useful here, just example
   - name: Finished
     exec:
       cmd: echo finished
+
 """
 
 class ProcessState():
