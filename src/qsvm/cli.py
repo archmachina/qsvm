@@ -146,23 +146,34 @@ class ConfigTaskExec:
 
         # Extract cmd property
         self.cmd = obslib.extract_property(definition, "cmd")
-        self.cmd = parent.session.resolve(self.cmd)
+        self.cmd = parent.session.resolve(self.cmd, (list, str))
+
+        # cmd should be an array, but a string is allowed. Convert
+        # it to an array here
+        if isinstance(self.cmd, str):
+            self.cmd = [self.cmd]
+
+        # Make sure we have correct types
+        for item in self.cmd:
+            if not isinstance(item, str) or item == "":
+                raise ValueError("Invalid type in exec list. Must be a list of strings or string")
 
         # Make sure there are no unknown values
         if len(definition.keys()) > 0:
             raise ValueError(f"Invalid keys on exec definition: {definition.keys()}")
 
     def run(self):
-        logger.info(f"Exec: running cmd: {self.cmd}")
+        for cmd_item in self.cmd:
+            logger.info(f"Running: {cmd_item}")
 
-        # Run 'cmd' using shell
-        sys.stdout.flush()
-        ret = subprocess.run(self.cmd, shell=True)
-        logger.info(f"Exec: return code {ret.returncode}")
+            # Run 'cmd' using shell
+            sys.stdout.flush()
+            ret = subprocess.run(cmd_item, shell=True)
+            logger.info(f"Exec: return code {ret.returncode}")
 
-        if ret.returncode != 0:
-            logger.error(f"Exec command returned non-zero: {ret.returncode}")
-            return 1
+            if ret.returncode != 0:
+                logger.error(f"Exec command returned non-zero: {ret.returncode}")
+                return 1
 
         return 0
 
@@ -172,11 +183,11 @@ class ConfigTaskCopy:
 
         # Extract content property
         self.content = obslib.extract_property(definition, "content")
-        self.content = parent.session.resolve(self.content)
+        self.content = parent.session.resolve(self.content, str)
 
         # Extract path property
         self.path = obslib.extract_property(definition, "path")
-        self.path = parent.session.resolve(self.path)
+        self.path = parent.session.resolve(self.path, str)
 
         # Make sure there are no unknown values
         if len(definition.keys()) > 0:
@@ -344,7 +355,7 @@ class QSVMSession():
             workingdir = vm_workingdir
 
         if workingdir is not None:
-            workingdir = session.resolve(workingdir)
+            workingdir = session.resolve(workingdir, str)
 
         if workingdir is None or workingdir == "":
             workingdir = os.path.join(path, vmname)
