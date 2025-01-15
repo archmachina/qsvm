@@ -384,6 +384,10 @@ class QSVMSession():
         if not isinstance(is_svc, bool):
             raise ValueError("Invalid is_svc passed to QSVMSession")
 
+        # Create the config directory, if it doesn't exist
+        if not os.path.exists(args.path):
+            os.makedirs(args.path)
+
         # Config paths
         qsvm_config_path = os.path.join(path, "qsvm.yaml")
         vm_config_dir = os.path.join(path, vmname)
@@ -563,10 +567,36 @@ def run_systemctl(user, args):
 
     return 0
 
+def get_cmd(args):
+    # Use supplied cmd, if provided
+    if args.cmd is not None and args.cmd != "":
+        return args.cmd
+
+    # Try sys.argv[0]
+    cmd = f"\"{sys.executable}\" \"{sys.argv[0]}\""
+    ret = subprocess.run(f"{cmd} test", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if ret.returncode == 0:
+        return cmd
+
+    # Try __file__
+    cmd = f"\"{sys.executable}\" \"{__file__}\""
+    ret = subprocess.run(f"{cmd} test", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if ret.returncode == 0:
+        return cmd
+
+    return None
+
 def process_install(args):
 
+    # Try to work out how to call ourselves
+    cmd = get_cmd(args)
+    if cmd is None:
+        logger.error("Could not determine how to invoke qsvm - Perhaps supply '--cmd'")
+        return 1
+
+    logger.debug(f"Using cmd to invoke qsvm: {cmd}")
+
     target = "network.target"
-    cmd = __file__
     if args.user:
         target = "default.target"
         cmd = cmd + " --user"
@@ -751,6 +781,9 @@ def stop_vm_process(vm_session):
 
     ProcessState.process = None
 
+def process_test(args):
+    print("ok")
+
 def process_direct_start_vm(args):
 
     # Read the VM configuration
@@ -870,6 +903,10 @@ def process_args():
 
     subparsers = parser.add_subparsers(dest="subcommand")
 
+    # Test subcommand
+    sub_test = subparsers.add_parser("test", help="Test execute of QSVM - Used internally to test access to QSVM")
+    sub_test.set_defaults(call_func=process_test)
+
     # Install subcommand
     sub_install = subparsers.add_parser("install", help="Install the systemd service")
     sub_install.set_defaults(call_func=process_install)
@@ -879,6 +916,8 @@ def process_args():
     group.add_argument("--stdout", action="store_true", default=False, help="Generate systemd unit content on stdout")
 
     group.add_argument("--reload", action="store_true", default=False, help="Perform a systemctl daemon-reload")
+
+    sub_install.add_argument("--cmd", action="store", default=None, help="Override command line for calling qsvm")
 
     # Create subcommand
     sub_create = subparsers.add_parser("create", help="Create a sample VM definition")
@@ -953,10 +992,6 @@ def process_args():
         args.config = "/etc/qsvm/"
         if args.user:
             args.config = os.path.expanduser("~/.config/qsvm/")
-
-    # Create the config directory, if it doesn't exist
-    if not os.path.exists(args.config):
-        os.makedirs(args.config)
 
     return args.call_func(args)
 
