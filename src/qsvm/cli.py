@@ -385,13 +385,14 @@ class QSVMSession():
             raise ValueError("Invalid is_svc passed to QSVMSession")
 
         # Create the config directory, if it doesn't exist
-        if not os.path.exists(args.path):
-            os.makedirs(args.path)
+        if not os.path.exists(path):
+            os.makedirs(path)
 
         # Config paths
         qsvm_config_path = os.path.join(path, "qsvm.yaml")
         vm_config_dir = os.path.join(path, vmname)
         vm_config_path = os.path.join(path, vmname, "config.yaml")
+        vm_config_vars_path = os.path.join(path, vmname, "config.vars.yaml")
 
         # Read qsvm configuration
         # Default to an empty dict if the configuration is not present
@@ -414,21 +415,34 @@ class QSVMSession():
         if not isinstance(vm_config, dict):
             raise ValueError("VM configuration must be a dictionary at top level")
 
-        # Extract configuration vars
+        # Extract qsvm configuration vars
         qsvm_vars = obslib.extract_property(qsvm_config, "vars", optional=True, default={})
         qsvm_vars = obslib.coerce_value(qsvm_vars, (dict, type(None)))
         if qsvm_vars is None:
             qsvm_vars = {}
 
+        # Extract config file vars
         vm_vars = obslib.extract_property(vm_config, "vars", optional=True, default={})
         vm_vars = obslib.coerce_value(vm_vars, (dict, type(None)))
         if vm_vars is None:
             vm_vars = {}
 
+        # Read the config.vars.yaml file, if it exists
+        vm_config_vars = {}
+        if os.path.isfile(vm_config_vars_path):
+            # Load and parse the config vars file
+            with open(vm_config_vars_path) as file:
+                vm_config_vars = yaml.safe_load(file)
+
+            # Make sure we have the correct type
+            if not isinstance(vm_config_vars, dict):
+                raise ValueError("Config vars file is not a top level dictionary")
+
         # Merge vars, with vm vars taking precedence
         config_vars = {}
         config_vars.update(qsvm_vars)
         config_vars.update(vm_vars)
+        config_vars.update(vm_config_vars)
 
         # Add standard vars
         config_vars["qsvm"] = {
