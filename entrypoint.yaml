@@ -115,7 +115,7 @@ actions:
         token: $GITHUB_TOKEN
         payload: |
           {
-            "tag_name": "$SEMVER_FULL",
+            "tag_name": "$SEMVER_ORIG",
             "name": "Version $SEMVER_FULL",
             "draft": false,
             "prerelease": $SEMVER_IS_PRERELEASE_WORD,
