@@ -18,6 +18,12 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
+class QSVMException(Exception):
+    pass
+
+class QSVMSystemctlException(Exception):
+    pass
+
 ubuntu_sample = """
 ---
 
@@ -120,27 +126,7 @@ prestart:
       cmd: >
         cloud-localds -v --network-config=network-config.yaml cloud-init.img user-data.yaml meta-data.yaml
 
-poststop:
-  # Nothing useful here, just example
-  - name: Finished
-    exec:
-      cmd: echo finished
-
 """
-
-class ProcessState():
-    process = None
-    stop = False
-    refresh = False
-
-def signal_usr1(sig, frame):
-    ProcessState.refresh = True
-
-def signal_int(sig, frame):
-    ProcessState.stop = True
-
-def signal_term(sig, frame):
-    ProcessState.stop = True
 
 class ConfigTaskExec:
     def __init__(self, definition, parent):
@@ -497,14 +483,6 @@ class QSVMSession():
 
         prestart = [ConfigTask(x, session) for x in prestart]
 
-        # Extract poststop commands
-        poststop = obslib.extract_property(vm_config, "poststop", optional=True, default=[])
-        poststop = obslib.coerce_value(poststop, (list, type(None)))
-        if poststop is None:
-            poststop = []
-
-        poststop = [ConfigTask(x, session) for x in poststop]
-
         # Make sure there are no other keys left
         if len(vm_config.keys()) > 0:
             raise ValueError(f"Unknown keys in VM configuration: {vm_config.keys()}")
@@ -545,7 +523,6 @@ class QSVMSession():
         self.qemu_guest_path = qemu_guest_path
 
         self.prestart = prestart
-        self.poststop = poststop
 
     def run_prestart(self):
         for task_def in self.prestart:
@@ -555,15 +532,7 @@ class QSVMSession():
 
         return 0
 
-    def run_poststop(self):
-        for task_def in self.poststop:
-            if task_def.run() != 0:
-                logger.error("Task in poststop failed")
-                return 1
-
-        return 0
-
-def run_systemctl(user, args):
+def run_systemctl(user, args, *, capture=False, check=False):
 
     cmd = ["systemctl"]
     if user:
@@ -573,13 +542,16 @@ def run_systemctl(user, args):
 
     logger.debug(f"Calling systemctl: {shlex.join(cmd)}")
     sys.stdout.flush()
-    ret = subprocess.run(cmd)
+    ret = subprocess.run(cmd, capture_output=capture)
 
     if ret.returncode != 0:
         logger.error(f"Systemctl returned non-zero: {ret.returncode}")
-        return 1
 
-    return 0
+        # Raise error, if requested
+        if check:
+            raise QSVMSystemctlException(f"Systemctl returned non-zero: {ret.returncode}")
+
+    return ret
 
 def get_cmd(args):
     # Use supplied cmd, if provided
@@ -626,8 +598,8 @@ def process_install(args):
     [Service]
     Type=exec
 
-    ExecStart={cmd} direct-start-vm --is_svc %i
-    ExecStop={cmd} direct-stop-vm --is_svc %i $MAINPID
+    ExecStart={cmd} --is_svc direct-start-vm %i
+    ExecStop={cmd} --is_svc direct-stop-vm %i $MAINPID
 
     Restart=on-failure
 
@@ -659,7 +631,9 @@ def process_install(args):
     # Reload systemd units, if requested
     if args.reload:
         logger.debug("Reloading systemd units")
-        run_systemctl(args.user, ["daemon-reload"])
+        if run_systemctl(args.user, ["daemon-reload"]).returncode != 0:
+            logger.error("Systemctl daemon-reload call failed")
+            return 1
     else:
         logger.debug("Not performing systemd daemon reload")
 
@@ -702,37 +676,14 @@ def process_direct_stop_vm(args):
         vm_session = QSVMSession(args.config, args.vm, args.is_svc)
     except Exception as e:
         logger.error(f"Failed to read VM configuration: {e}")
-
-    # Shutdown delay
-    shutdown_delay = 60
-
-    # Process to stop
-    pid = args.pid
-
-    # Make sure the process exists
-    if not psutil.pid_exists(pid):
-        logger.error(f"PID for qsvm process does not exist: {pid}")
         return 1
 
-    # Attempt to stop the process with SIGINT
-    os.kill(pid, signal.SIGINT)
-
-    # Wait for the process to exit
-    count = 0
-    while count < 90:
-        if not psutil.pid_exists(pid):
-            return 0
-
-        time.sleep(1)
-
-    # Process is still active - send kill signal
-    os.kill(pid, signal.SIGKILL)
-
-    return 0
-
-def stop_vm_process(vm_session):
-    if ProcessState.process is None:
-        return
+    # Get a reference to the target process
+    try:
+        qemu_process = psutil.Process(args.pid)
+    except psutil.NoSuchProcess:
+        logger.error(f"Process {args.pid} does not exist")
+        return 1
 
     # Open the qemu monitor socket and ask qemu to shut down the VM
     if vm_session.qemu_mon_path is not None and vm_session.qemu_mon_path != "":
@@ -766,34 +717,45 @@ def stop_vm_process(vm_session):
                     stream.flush()
                     resp = stream.readlines()
 
-                    # Now wait for the process to finish
-                    ProcessState.process.wait(timeout=30)
+                # Now wait for the process to finish
+                qemu_process.wait(timeout=30)
 
-                    # Finish here if the process has returned
-                    if ProcessState.process.returncode is not None:
-                        return
+                if not psutil.pid_exists(args.pid):
+                    return 0
+
+            except psutil.TimeoutExpired as e:
+                logger.debug(f"Timeout waiting for qemu process to finish. Attempt {count}")
             except Exception as e:
                 logger.error(f"Failed to shutdown VM via qemu-mon: {e}")
 
-    # Send a SIGINT to try and stop the VM
-    logger.info(f"Sending SIGINT to process: {ProcessState.process.pid}")
-    ProcessState.process.send_signal(signal.SIGINT)
-    try:
-        ProcessState.process.wait(timeout=15)
+    else:
+        logger.info("No monitor path to send shutdown request to QEMU process")
 
-        if ProcessState.process.returncode is not None:
-            return
-    except subprocess.TimeoutExpired as e:
+    # Shutdown the process via INT
+    logger.info(f"Sending SIGINT to process: {args.pid}")
+    qemu_process.send_signal(signal.SIGINT)
+    try:
+        qemu_process.wait(timeout=15)
+
+        if not psutil.pid_exists(args.pid):
+            return 0
+    except psutil.TimeoutExpired as e:
         pass
 
-    # Process is still running. Attempt to kill
-    logger.info(f"Sending SIGKILL to process: {ProcessState.process.pid}")
-    ProcessState.process.kill()
+    # Shutdown the process via KILL
+    logger.info(f"Sending SIGKILL to process: {args.pid}")
+    qemu_process.send_signal(signal.SIGKILL)
+    try:
+        qemu_process.wait(timeout=15)
 
-    # Wait indefinitely at this point
-    ProcessState.process.wait()
+        if not psutil.pid_exists(args.pid):
+            return 0
+    except psutil.TimeoutExpired as e:
+        pass
 
-    ProcessState.process = None
+    # Process didn't stop from monitor, INT or KILL...
+    logger.error(f"Process still exists after SIGKILL")
+    return 1
 
 def process_test(args):
     print("ok")
@@ -807,97 +769,93 @@ def process_direct_start_vm(args):
     if vm_session.run_prestart() != 0:
         return 1
 
-    # Register signals
-    signal.signal(signal.SIGUSR1, signal_usr1)
-    signal.signal(signal.SIGINT, signal_int)
-    signal.signal(signal.SIGTERM, signal_term)
-
     # Start the VM
     logger.info(f"VM exec: {' '.join(vm_session.exec_cmd)}")
     sys.stdout.flush()
-    ProcessState.process = subprocess.Popen(vm_session.exec_cmd)
-    logger.info(f"Monitoring VM process: {ProcessState.process.pid}")
+    os.execvp(vm_session.exec_cmd[0], vm_session.exec_cmd)
 
-    while True:
-        # If there is no process any more, stop here
-        if ProcessState.process is None:
-            break
-
-        # Stop the process, if requested
-        if ProcessState.stop:
-            logger.info("VM process stop requested")
-            stop_vm_process(vm_session)
-
-            # Break the loop and start processing poststop
-            break
-
-        # Handle refresh, which checks for differences in exec command
-        if ProcessState.refresh:
-            ProcessState.refresh = False
-            logger.info("VM process refresh requested")
-
-            # Reread the configuration and compare the exec command
-            try:
-                new_vm_session = QSVMSession(args.config, args.vm, args.is_svc)
-            except Exception as e:
-                logger.error(f"Failure to reload configuration: {e}")
-                continue
-
-            # Exit here if the exec commands are identical
-            if new_vm_session.exec_cmd == vm_session.exec_cmd:
-                logger.info("VM exec cmd has not changed")
-                continue
-            else:
-                logger.info("VM exec cmd has changed. Restarting VM")
-
-            # Stop the VM process
-            stop_vm_process(vm_session)
-
-            # Run poststop
-            if vm_session.run_poststop() != 0:
-                return 1
-
-            # Operate using the new configuration
-            vm_session = new_vm_session
-
-            # Run prestart
-            if vm_session.run_prestart() != 0:
-                return 1
-
-            # Start the VM process
-            logger.info(f"VM exec: {vm_session.exec_cmd}")
-            sys.stdout.flush()
-            ProcessState.process = subprocess.Popen(vm_session.exec_cmd)
-
-        # Wait for the process to finish (or we're interrupted by a signal)
-        try:
-            ProcessState.process.wait(timeout=2)
-        except subprocess.TimeoutExpired as e:
-            pass
-
-        if ProcessState.process.returncode is not None:
-            # Process has finished
-            logger.info(f"QEMU returned {ProcessState.process.returncode}")
-            ProcessState.process = None
-            break
-
-    # Run poststop tasks
-    if vm_session.run_poststop() != 0:
-        return 1
-
-    return 0
+    # If we're here, then we failed to load the qemu process
+    logger.error("execvp returned/failed to start qemu process")
+    return 1
 
 def process_start(args):
-    return run_systemctl(args.user, ["start", f"{args.svc}@{args.vm}"])
+    return run_systemctl(args.user, ["start", f"{args.svc}@{args.vm}"]).returncode
 
 def process_stop(args):
-    return run_systemctl(args.user, ["stop", f"{args.svc}@{args.vm}"])
+    return run_systemctl(args.user, ["stop", f"{args.svc}@{args.vm}"]).returncode
+
+def should_restart(args):
+
+    # Check if we're doing a conditional restart
+    if not args.if_changed:
+        # Restart should be performed
+        return True
+
+    # Check the command line for the current qemu process against the configuration
+    # and restart if they are different
+
+    # This implicitly works against systemd, so we'll set is_svc, whether it's been specified by the user or not
+    # The 'is_svc' argument can influence the vm_session exec command line, so we need to set it to make sure
+    # we get the same exec cmd as would have been determined through systemd
+    args.is_svc = True
+
+    # Read the VM configuration
+    try:
+        vm_session = QSVMSession(args.config, args.vm, args.is_svc)
+    except Exception as e:
+        raise QSVMException(f"Failed to read VM configuration: {e}")
+
+    # Retrieve the current PID from systemd
+    ret = run_systemctl(args.user, ["show", f"{args.svc}@{args.vm}", "--property=MainPID"], capture=True)
+    lines = ret.stdout.decode("utf-8").split("\n")
+    if len(lines) < 1:
+        raise QSVMException("Unexpected result from systemctl show. Expected output")
+
+    # Process the output from show
+    items = lines[0].split("=")
+    if len(items) != 2 or items[0] != "MainPID":
+        raise QSVMException(f"Unexpected result from systemctl show. Expecting 'MainPID=??'. Got {lines[0]}")
+
+    # Convert pid str to int
+    try:
+        pid = int(items[1])
+    except ValueError as e:
+        raise QSVMException(f"Pid from systemctl is not valid. Expected int. Received {items[1]}")
+
+    # Check for 0 pid - nothing is currently running
+    if pid == 0:
+        return True
+
+    # Get a reference to the pid
+    try:
+        qemu_process = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        raise QSVMException(f"Process referenced by systemctl doesn't exist: {pid}")
+
+    # Compare the exec cmds of the running process and what we read from the configuration
+    running_cmd = ' '.join(qemu_process.cmdline()).strip()
+    config_cmd = ' '.join(vm_session.exec_cmd).strip()
+    logger.debug(f"Running cmdline: {running_cmd}")
+    logger.debug(f"Config cmdline: {config_cmd}")
+
+    if running_cmd != config_cmd:
+        logger.info("Running cmdline is different than configured cmdline")
+        return True
+
+    logger.info("Running and configured cmdlines are identical. Not restarting")
+    return False
+
+def process_restart(args):
+    # Restart the process, if should_restart determined so and check systemctl result
+    if should_restart(args) and run_systemctl(args.user, ["restart", f"{args.svc}@{args.vm}"]).returncode != 0:
+        logger.error("Systemd restart for service returned non-zero")
+        return 1
 
 def process_enable(args):
-    return run_systemctl(args.user, ["enable", f"{args.svc}@{args.vm}"])
+    return run_systemctl(args.user, ["enable", f"{args.svc}@{args.vm}"]).returncode
 
 def process_disable(args):
-    return run_systemctl(args.user, ["disable", f"{args.svc}@{args.vm}"])
+    return run_systemctl(args.user, ["disable", f"{args.svc}@{args.vm}"]).returncode
 
 def process_args():
     parser = argparse.ArgumentParser(
@@ -912,6 +870,8 @@ def process_args():
     parser.add_argument("--config", default=None, help="Configuration directory")
 
     parser.add_argument("--svc", default="qsvm", help="Systemd service name")
+
+    parser.add_argument("--is_svc", action="store_true", help="QSVM is being called from a service - set when called from systemd")
 
     parser.set_defaults(call_func=None)
 
@@ -949,8 +909,6 @@ def process_args():
 
     sub_direct_start_vm.add_argument("vm", action="store", help="VM name to start")
 
-    sub_direct_start_vm.add_argument("--is_svc", action="store_true", help="Direct start from svc (systemd) - set when called from systemd")
-
     # Internal Stop subcommand
     sub_direct_stop_vm = subparsers.add_parser("direct-stop-vm", help="Direct stop VM by PID. Normally called by systemd")
     sub_direct_stop_vm.set_defaults(call_func=process_direct_stop_vm)
@@ -970,6 +928,14 @@ def process_args():
     sub_stop.set_defaults(call_func=process_stop)
 
     sub_stop.add_argument("vm", action="store", help="VM name to stop")
+
+    # restart command
+    sub_restart = subparsers.add_parser("restart", help="Restart a VM using systemd")
+    sub_restart.set_defaults(call_func=process_restart)
+
+    sub_restart.add_argument("vm", action="store", help="VM name to restart")
+
+    sub_restart.add_argument("--if_changed", action="store_true", help="Request qemu restart if the configuration has changed")
 
     # enable command
     sub_enable = subparsers.add_parser("enable", help="Configure a VM to start automatically")
