@@ -545,7 +545,7 @@ class QSVMSession():
 def process_install(args):
 
     # Try to work out how to call ourselves
-    cmd = get_selfcmd(args.cmd)
+    cmd = util.get_selfcmd(args.cmd)
     if cmd is None:
         logger.error("Could not determine how to invoke qsvm - Perhaps supply '--cmd'")
         return 1
