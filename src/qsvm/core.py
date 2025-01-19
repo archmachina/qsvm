@@ -35,6 +35,7 @@ vars:
   initial_size: "20G"
   cloud_image: "https://cloud-images.ubuntu.com/noble/20241210/noble-server-cloudimg-amd64.img"
   interface: "enp0s2"
+  mac: "{{ gen_mac([qsvm.vmname]) }}"
 
   network_config: |
     ---
@@ -86,7 +87,7 @@ exec: >
     -drive if=virtio,format=raw,file=cloud-init.img
     -drive if=virtio,format=qcow2,file=data.img
     -netdev user,id=net0,net=192.168.0.0/24,dhcpstart=192.168.0.50
-    -device virtio-net-pci,netdev=net0
+    -device virtio-net-pci,netdev=net0,mac={{ mac }}
 
 prestart:
   - name: Configure drives
