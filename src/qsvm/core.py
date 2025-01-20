@@ -794,10 +794,12 @@ def should_restart(args):
 
     # Check for 0 pid - nothing is currently running
     if pid == 0:
+        logger.debug(f"Found no current PID for qemu service")
         return True
 
     # Get a reference to the pid
     try:
+        logger.debug(f"Found running qemu process with pid {pid}")
         qemu_process = psutil.Process(pid)
     except psutil.NoSuchProcess:
         raise exception.QSVMException(f"Process referenced by systemctl doesn't exist: {pid}")
@@ -812,7 +814,21 @@ def should_restart(args):
         logger.info("Running cmdline is different than configured cmdline")
         return True
 
-    logger.info("Running and configured cmdlines are identical. Not restarting")
+    # List of files to check for modification times newer than the running VM process
+    file_list = [
+        os.path.join(args.config, args.vm, "config.yaml"),
+        os.path.join(args.config, args.vm, "config.vars.yaml")
+    ]
+
+    process_created = qemu_process.create_time()
+
+    # Check files and trigger restart if any are newer than the process time
+    for file_path in file_list:
+        if os.path.exists(file_path) and os.path.getmtime(file_path) > process_created:
+            logger.info(f"File ({file_path}) is newer than the qemu process create time")
+            return True
+
+    logger.info("Running and configured cmdlines are identical and files are older than the process. Not restarting")
     return False
 
 def process_restart(args):
