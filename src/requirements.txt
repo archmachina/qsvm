@@ -1,2 +1,2 @@
-obslib==0.2.0
+obslib==0.7.0
 psutil==7.0.0
