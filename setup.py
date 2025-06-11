@@ -19,7 +19,7 @@ setup_args = {
     "download_url": "https://pypi.org/project/qsvm/",
     "entry_points": {"console_scripts": ["qsvm = qsvm.cli:main"]},
     "package_dir": {"": "src"},
-    "install_requires": ["obslib>=0.2.0", "psutil>=6.1.1"],
+    "install_requires": ["obslib>=0.2.0,<0.3.0", "psutil>=6.1.1"],
 }
 
 if __name__ == "__main__":
