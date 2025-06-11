@@ -8,12 +8,21 @@ SCRIPT=$(readlink -f "${0}")
 DIR=$(dirname "${SCRIPT}")
 cd "${DIR}" || exit 1
 
+# Configure and activate the virtual environment
 python3 -m venv env
 . ./env/bin/activate
 python3 -m pip install --upgrade pip
-python3 -m pip install -r ./requirements.txt
 
-exec bdast -v ./entrypoint.yaml "$@"
+# Install from requirements, if present
+if [ -f requirements.txt ] ; then
+  python3 -m pip install -r ./requirements.txt
+fi
+
+# If bdast is already installed from requirements, then this won't
+# change it, otherwise it will install the latest version
+python3 -m pip install bdast
+
+exec bdast run "$@"
 
 exit 1
 

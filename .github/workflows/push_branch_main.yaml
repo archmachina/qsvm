@@ -18,9 +18,16 @@ jobs:
         with:
           submodules: true
 
+      - name: python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: 'pip'
+
       - name: push_branch_main
         shell: bash
         run: |
           ./entrypoint push_branch_main
         env:
           SECRET_REGISTRY_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
+
