@@ -1,0 +1,3 @@
+[submodule ".bdast"]
+	path = .bdast
+	url = https://github.com/archmachina/bdast-common

@@ -1,0 +1,23 @@
+---
+version: "2alpha"
+
+vars:
+  github_owner: archmachina
+  github_repo: qsvm
+
+include:
+  - .bdast/common.yaml
+  - .bdast/python.yaml
+
+actions:
+
+  # Overrides for 'common' actions to perform actions
+  # specific to this repo
+
+  # Steps to perform when building from a git tag v*
+  push_tag_v:
+    steps:
+      - +build
+      - github_release
+      - pypi_release
+
