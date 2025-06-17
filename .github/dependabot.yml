@@ -17,7 +17,8 @@ updates:
 
   # Maintain dependencies for docker
   - package-ecosystem: "docker"
-    directory: "/"
+    directories:
+      - "**/*"
     schedule:
       interval: "daily"
 
@@ -35,6 +36,8 @@ updates:
 
   # Maintain dependencies for pip
   - package-ecosystem: "pip"
-    directory: "/"
+    directories:
+      - "**/*"
     schedule:
       interval: "daily"
+
