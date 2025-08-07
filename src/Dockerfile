@@ -4,7 +4,7 @@ ARG use_image=base
 
 ################
 # Base image
-FROM python:3.13.5-slim-bullseye AS base
+FROM python:3.13.6-slim-bullseye AS base
 
 # Work directory
 RUN mkdir -p /work/bin && chmod 777 /work
