@@ -1,4 +1,4 @@
 bdast==0.5.3
-dfbar==0.4.4
+dfbar==0.4.6
 pylint==3.3.7
 
